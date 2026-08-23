@@ -605,6 +605,12 @@ GraphicsAdapterInfo GetPhysicalDeviceGraphicsAdapterInfo(const VulkanUtilities::
         }
     }
 
+    // Multi-GPU: A single VkPhysicalDevice represents a single node. Linked groups with multiple
+    // nodes are detected via vkEnumeratePhysicalDeviceGroups during device creation, and NodeCount
+    // is updated at that time. The initial value here is conservative (1 node).
+    AdapterInfo.NodeCount = 1;
+    AdapterInfo.NodeMask  = 1;
+
     return AdapterInfo;
 }
 
@@ -614,9 +620,8 @@ void EngineFactoryVkImpl::EnumerateAdapters(Version              MinVersion,
 {
     if (m_wpDevice.IsValid())
     {
-        LOG_ERROR_MESSAGE("We use global pointers to Vulkan functions and can not simultaneously create more than one instance and logical device.");
-        NumAdapters = 0;
-        return;
+        LOG_INFO_MESSAGE("Enumerating Vulkan adapters while a device is already alive. "
+                         "This is supported via instance-level trampolined dispatch.");
     }
 
     VulkanUtilities::Instance::CreateInfo InstanceCI;
@@ -698,8 +703,15 @@ void EngineFactoryVkImpl::CreateDeviceAndContextsVk(const EngineVkCreateInfo& En
 
     if (m_wpDevice.IsValid())
     {
-        LOG_ERROR_MESSAGE("We use global pointers to Vulkan functions and can not simultaneously create more than one instance and logical device.");
-        return;
+        // Diligent uses volk, which maintains a single global Vulkan function-pointer table.
+        // Creating more than one device is supported: the additional device relies on the
+        // instance-level (trampolined) function pointers loaded by volkLoadInstance(), which
+        // dispatch correctly for every device (see VulkanUtilities::LogicalDevice). The only cost
+        // is a small per-call overhead because the per-device optimization (volkLoadDevice) can be
+        // applied to a single device at a time.
+        LOG_INFO_MESSAGE("Creating an additional Vulkan render device in the same process. "
+                         "Vulkan device function calls will use non-optimized (trampolined) global "
+                         "pointers while more than one device is alive.");
     }
 
     try
@@ -761,7 +773,7 @@ void EngineFactoryVkImpl::CreateDeviceAndContextsVk(const EngineVkCreateInfo& En
             LOG_WARNING_MESSAGE(VK_KHR_MAINTENANCE1_EXTENSION_NAME, " is not supported.");
 
         // Enable device features if they are supported and throw an error if not supported, but required by user.
-        const GraphicsAdapterInfo AdapterInfo = GetPhysicalDeviceGraphicsAdapterInfo(*PhysicalDevice);
+        GraphicsAdapterInfo AdapterInfo = GetPhysicalDeviceGraphicsAdapterInfo(*PhysicalDevice);
         VerifyEngineCreateInfo(EngineCI, AdapterInfo);
         const DeviceFeatures   EnabledFeatures   = EnableDeviceFeatures(AdapterInfo.Features, EngineCI.Features);
         const DeviceFeaturesVk AdapterFeaturesVk = PhysicalDeviceFeaturesToDeviceFeaturesVk(PhysicalDevice->GetExtFeatures(), DEVICE_FEATURE_STATE_OPTIONAL);
@@ -1355,6 +1367,79 @@ void EngineFactoryVkImpl::CreateDeviceAndContextsVk(const EngineVkCreateInfo& En
                 DeviceExtensions.push_back(EngineCI.ppDeviceExtensionNames[i]);
         }
 
+        // Multi-GPU: Enable VK_KHR_device_group and chain VkDeviceGroupDeviceCreateInfo if linked mode is requested.
+        VkDeviceGroupDeviceCreateInfo DeviceGroupCI{};
+        DeviceGroupCI.sType = VK_STRUCTURE_TYPE_DEVICE_GROUP_DEVICE_CREATE_INFO;
+        std::vector<VkPhysicalDevice> DeviceGroupPhysDevices;
+
+        if (EngineCI.GpuMode == GPU_MODE_LINKED &&
+            Instance->IsExtensionEnabled(VK_KHR_DEVICE_GROUP_CREATION_EXTENSION_NAME) &&
+            PhysicalDevice->IsExtensionSupported(VK_KHR_DEVICE_GROUP_EXTENSION_NAME))
+        {
+#if DILIGENT_USE_VOLK
+            uint32_t DeviceGroupCount = 0;
+            VkResult grpRes = vkEnumeratePhysicalDeviceGroups(Instance->GetVkInstance(), &DeviceGroupCount, nullptr);
+            if (grpRes == VK_SUCCESS && DeviceGroupCount > 0)
+            {
+                std::vector<VkPhysicalDeviceGroupProperties> GroupProps(DeviceGroupCount);
+                for (auto& gp : GroupProps)
+                {
+                    gp.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GROUP_PROPERTIES;
+                    gp.pNext = nullptr;
+                }
+                grpRes = vkEnumeratePhysicalDeviceGroups(Instance->GetVkInstance(), &DeviceGroupCount, GroupProps.data());
+                if (grpRes == VK_SUCCESS)
+                {
+                    // Find the group containing our selected physical device
+                    for (uint32_t g = 0; g < DeviceGroupCount; ++g)
+                    {
+                        const VkPhysicalDeviceGroupProperties& Group = GroupProps[g];
+                        for (uint32_t d = 0; d < Group.physicalDeviceCount; ++d)
+                        {
+                            if (Group.physicalDevices[d] == PhysicalDevice->GetVkDeviceHandle())
+                            {
+                                if (Group.physicalDeviceCount > 1)
+                                {
+                                    DeviceGroupPhysDevices.assign(Group.physicalDevices,
+                                                                  Group.physicalDevices + Group.physicalDeviceCount);
+                                    DeviceGroupCI.physicalDeviceCount = Group.physicalDeviceCount;
+                                    DeviceGroupCI.pPhysicalDevices    = DeviceGroupPhysDevices.data();
+                                    DeviceGroupCI.pNext               = vkDeviceCreateInfo.pNext;
+                                    vkDeviceCreateInfo.pNext          = &DeviceGroupCI;
+
+                                    DeviceExtensions.push_back(VK_KHR_DEVICE_GROUP_EXTENSION_NAME);
+
+                                    LOG_INFO_MESSAGE("Vulkan linked multi-GPU: device group with ",
+                                                     Group.physicalDeviceCount, " physical devices detected.");
+                                }
+                                else
+                                {
+                                    LOG_WARNING_MESSAGE("GPU_MODE_LINKED requested but device group has only 1 physical device. "
+                                                       "Falling back to single-GPU behavior.");
+                                }
+                                goto device_group_search_done;
+                            }
+                        }
+                    }
+                    LOG_WARNING_MESSAGE("GPU_MODE_LINKED requested but selected physical device was not found in any device group.");
+                }
+            }
+            else
+            {
+                LOG_WARNING_MESSAGE("GPU_MODE_LINKED requested but vkEnumeratePhysicalDeviceGroups failed or returned 0 groups.");
+            }
+        device_group_search_done:;
+            // Update adapter info with actual node count from device group
+            if (DeviceGroupCI.physicalDeviceCount > 1)
+            {
+                AdapterInfo.NodeCount = DeviceGroupCI.physicalDeviceCount;
+                AdapterInfo.NodeMask  = (1u << DeviceGroupCI.physicalDeviceCount) - 1u;
+            }
+#else
+            LOG_WARNING_MESSAGE("GPU_MODE_LINKED requires Volk for vkEnumeratePhysicalDeviceGroups. Falling back to single-GPU.");
+#endif
+        }
+
         vkDeviceCreateInfo.ppEnabledExtensionNames = DeviceExtensions.empty() ? nullptr : DeviceExtensions.data();
         vkDeviceCreateInfo.enabledExtensionCount   = static_cast<uint32_t>(DeviceExtensions.size());
 
@@ -1398,7 +1483,7 @@ void EngineFactoryVkImpl::CreateDeviceAndContextsVk(const EngineVkCreateInfo& En
                 VERIFY_EXPR(QueueIndex != DEFAULT_QUEUE_ID);
                 VkDeviceQueueCreateInfo& QueueCI = QueueInfos[QueueIndex];
 
-                CommandQueuesVk[CtxInd] = NEW_RC_OBJ(RawMemAllocator, "CommandQueueVk instance", CommandQueueVkImpl)(LogicalDevice, SoftwareQueueIndex{CtxInd}, EngineCI.NumImmediateContexts, QueueCI.queueCount, ContextInfo);
+                CommandQueuesVk[CtxInd] = NEW_RC_OBJ(RawMemAllocator, "CommandQueueVk instance", CommandQueueVkImpl)(LogicalDevice, SoftwareQueueIndex{CtxInd}, EngineCI.NumImmediateContexts, QueueCI.queueCount, ContextInfo, EngineCI.GpuMode == GPU_MODE_LINKED);
                 CommandQueues[CtxInd]   = CommandQueuesVk[CtxInd];
                 QueueCI.queueCount += 1;
             }
@@ -1486,6 +1571,7 @@ void EngineFactoryVkImpl::AttachToVulkanDevice(std::shared_ptr<VulkanUtilities::
             const uint32_t           QueueId    = ppCommandQueues[CtxInd]->GetQueueFamilyIndex();
             const auto&              QueueProps = pRenderDeviceVk->GetPhysicalDevice().GetQueueProperties();
             const COMMAND_QUEUE_TYPE QueueType  = VkQueueFlagsToCmdQueueType(QueueProps[QueueId].queueFlags);
+            const Uint32             NodeIndex  = (EngineCI.NumImmediateContexts > 0) ? pImmediateContextInfo[CtxInd].NodeIndex : 0u;
 
             RefCntAutoPtr<DeviceContextVkImpl> pImmediateCtxVk{
                 NEW_RC_OBJ(RawMemAllocator, "DeviceContextVkImpl instance", DeviceContextVkImpl)(
@@ -1493,9 +1579,10 @@ void EngineFactoryVkImpl::AttachToVulkanDevice(std::shared_ptr<VulkanUtilities::
                     DeviceContextDesc{
                         pImmediateContextInfo[CtxInd].Name,
                         QueueType,
-                        false,   // IsDeferred
-                        CtxInd,  // Context id
-                        QueueId} //
+                        false,      // IsDeferred
+                        CtxInd,     // Context id
+                        QueueId,    // Queue id
+                        NodeIndex}  // Node index (multi-GPU)
                     )};
             // We must call AddRef() (implicitly through QueryInterface()) because pRenderDeviceVk will
             // keep a weak reference to the context

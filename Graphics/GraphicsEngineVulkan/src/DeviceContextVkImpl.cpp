@@ -100,6 +100,13 @@ DeviceContextVkImpl::DeviceContextVkImpl(IReferenceCounters*      pRefCounters,
     }
 // clang-format on
 {
+#if DILIGENT_USE_VOLK
+    // Route this context's command-buffer calls through the owning device's optimized per-device
+    // function table so that multiple Vulkan devices can record commands simultaneously without
+    // clobbering each other's global function pointers (see VulkanUtilities::CommandBuffer).
+    m_CommandBuffer.SetDeviceTable(&m_pDevice->GetLogicalDevice().GetVkTable());
+#endif
+
     if (!IsDeferred())
     {
         PrepareCommandPool(GetCommandQueueId());

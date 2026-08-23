@@ -480,7 +480,8 @@ public:
                       Uint32                      NumDescriptorsInHeap,
                       Uint32                      NumDynamicDescriptors,
                       D3D12_DESCRIPTOR_HEAP_TYPE  Type,
-                      D3D12_DESCRIPTOR_HEAP_FLAGS Flags);
+                      D3D12_DESCRIPTOR_HEAP_FLAGS Flags,
+                      UINT                        NodeMask = 1);
 
     // clang-format off
     GPUDescriptorHeap             (const GPUDescriptorHeap&) = delete;

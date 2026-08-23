@@ -80,19 +80,20 @@ DeviceContextD3D12Impl::DeviceContextD3D12Impl(IReferenceCounters*      pRefCoun
     {
         pDeviceD3D12Impl->GetDynamicMemoryManager(),
         GetContextObjectName("Dynamic heap", Desc.IsDeferred, Desc.ContextId),
-        pDeviceD3D12Impl->GetProperties().DynamicHeapPageSize
+        pDeviceD3D12Impl->GetProperties().DynamicHeapPageSize,
+        1u << Desc.NodeIndex // Node mask for linked multi-GPU (defaults to 1 for single-GPU)
     },
     m_DynamicGPUDescriptorAllocator
     {
         {
             GetRawAllocator(),
-            pDeviceD3D12Impl->GetGPUDescriptorHeap(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV),
+            pDeviceD3D12Impl->GetGPUDescriptorHeap(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, Desc.NodeIndex),
             pDeviceD3D12Impl->GetProperties().DynamicDescriptorAllocationChunkSize[D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV],
             GetContextObjectName("CBV_SRV_UAV dynamic descriptor allocator", Desc.IsDeferred, Desc.ContextId)
         },
         {
             GetRawAllocator(),
-            pDeviceD3D12Impl->GetGPUDescriptorHeap(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER),
+            pDeviceD3D12Impl->GetGPUDescriptorHeap(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, Desc.NodeIndex),
             pDeviceD3D12Impl->GetProperties().DynamicDescriptorAllocationChunkSize[D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER],
             GetContextObjectName("SAMPLER     dynamic descriptor allocator", Desc.IsDeferred, Desc.ContextId)
         }

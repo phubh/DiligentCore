@@ -482,6 +482,12 @@ void EngineFactoryD3D12Impl::CreateDeviceAndContextsD3D12(const EngineD3D12Creat
             queueDesc.Flags    = D3D12_COMMAND_QUEUE_FLAG_NONE;
             queueDesc.Priority = QueuePriorityToD3D12QueuePriority(ContextCI.Priority);
             queueDesc.Type     = QueueIdToD3D12CommandListType(HardwareQueueIndex{ContextCI.QueueId});
+            // In Linked Multi-GPU mode, route queue to the appropriate node via NodeMask.
+            // NodeIndex=0 maps to NodeMask=1 (D3D12 uses 1-based bit mask).
+            if (EngineCI.GpuMode == GPU_MODE_LINKED && ContextCI.NodeIndex < 32u)
+                queueDesc.NodeMask = 1u << ContextCI.NodeIndex;
+            else
+                queueDesc.NodeMask = 1; // default: node 0
 
             CComPtr<ID3D12CommandQueue> pd3d12CmdQueue;
             hr = d3d12Device->CreateCommandQueue(&queueDesc, __uuidof(pd3d12CmdQueue), reinterpret_cast<void**>(static_cast<ID3D12CommandQueue**>(&pd3d12CmdQueue)));
@@ -617,6 +623,7 @@ void EngineFactoryD3D12Impl::AttachToD3D12Device(void*                        pd
         {
             const D3D12_COMMAND_LIST_TYPE d3d12CmdListType = ppCommandQueues[CtxInd]->GetD3D12CommandQueueDesc().Type;
             const HardwareQueueIndex      QueueId          = D3D12CommandListTypeToQueueId(d3d12CmdListType);
+            const Uint32                  NodeIndex        = (EngineCI.NumImmediateContexts > 0) ? pImmediateContextInfo[CtxInd].NodeIndex : 0u;
 
             RefCntAutoPtr<DeviceContextD3D12Impl> pImmediateCtxD3D12{
                 NEW_RC_OBJ(RawMemAllocator, "DeviceContextD3D12Impl instance", DeviceContextD3D12Impl)(
@@ -624,9 +631,10 @@ void EngineFactoryD3D12Impl::AttachToD3D12Device(void*                        pd
                     DeviceContextDesc{
                         pImmediateContextInfo[CtxInd].Name,
                         AdapterInfo.Queues[QueueId].QueueType,
-                        false,   // IsDeferred
-                        CtxInd,  // Context index
-                        QueueId} //
+                        false,      // IsDeferred
+                        CtxInd,     // Context index
+                        QueueId,    // Queue id
+                        NodeIndex}  // Node index (multi-GPU)
                     )};
             // We must call AddRef() (implicitly through QueryInterface()) because pRenderDeviceD3D12 will
             // keep a weak reference to the context
@@ -755,6 +763,14 @@ GraphicsAdapterInfo EngineFactoryD3D12Impl::GetGraphicsAdapterInfo(void*        
             if (AdapterInfo.Type != ADAPTER_TYPE_SOFTWARE && (DataArch.UMA || DataArch.CacheCoherentUMA))
                 AdapterInfo.Type = ADAPTER_TYPE_INTEGRATED;
         }
+    }
+
+    // Set multi-GPU node info
+    if (d3d12Device)
+    {
+        const UINT NodeCount     = d3d12Device->GetNodeCount();
+        AdapterInfo.NodeCount    = NodeCount;
+        AdapterInfo.NodeMask     = (1u << NodeCount) - 1u;
     }
 
     // Set queue info

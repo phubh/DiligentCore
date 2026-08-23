@@ -161,11 +161,8 @@ RenderDeviceD3D12Impl::RenderDeviceD3D12Impl(IReferenceCounters*          pRefCo
         {RawMemAllocator, *this, EngineCI.CPUDescriptorHeapAllocationSize[2], D3D12_DESCRIPTOR_HEAP_TYPE_RTV,         D3D12_DESCRIPTOR_HEAP_FLAG_NONE},
         {RawMemAllocator, *this, EngineCI.CPUDescriptorHeapAllocationSize[3], D3D12_DESCRIPTOR_HEAP_TYPE_DSV,         D3D12_DESCRIPTOR_HEAP_FLAG_NONE}
     },
-    m_GPUDescriptorHeaps
-    {
-        {RawMemAllocator, *this, EngineCI.GPUDescriptorHeapSize[0], EngineCI.GPUDescriptorHeapDynamicSize[0], D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE},
-        {RawMemAllocator, *this, EngineCI.GPUDescriptorHeapSize[1], EngineCI.GPUDescriptorHeapDynamicSize[1], D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER,     D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE}
-    },
+    m_GPUDescriptorHeaps{},
+    m_NodeCount{AdapterInfo.NodeCount},
     m_CmdListManagers
     {
         {*this, D3D12_COMMAND_LIST_TYPE_DIRECT},
@@ -180,6 +177,22 @@ RenderDeviceD3D12Impl::RenderDeviceD3D12Impl(IReferenceCounters*          pRefCo
 // clang-format on
 {
     m_DeviceInfo.Type = RENDER_DEVICE_TYPE_D3D12;
+
+    // Create per-node GPU descriptor heaps
+    for (Uint32 node = 0; node < m_NodeCount && node < DILIGENT_MAX_LINKED_GPU_NODES; ++node)
+    {
+        const UINT NodeMask = 1u << node;
+        m_GPUDescriptorHeaps[node][0] = std::make_unique<GPUDescriptorHeap>(
+            RawMemAllocator, *this,
+            EngineCI.GPUDescriptorHeapSize[0], EngineCI.GPUDescriptorHeapDynamicSize[0],
+            D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,
+            NodeMask);
+        m_GPUDescriptorHeaps[node][1] = std::make_unique<GPUDescriptorHeap>(
+            RawMemAllocator, *this,
+            EngineCI.GPUDescriptorHeapSize[1], EngineCI.GPUDescriptorHeapDynamicSize[1],
+            D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,
+            NodeMask);
+    }
 
     try
     {
@@ -307,9 +320,13 @@ RenderDeviceD3D12Impl::~RenderDeviceD3D12Impl()
     {
         DEV_CHECK_ERR(m_CPUDescriptorHeaps[i].DvpGetTotalAllocationCount() == 0, "All CPU descriptor heap allocations must be released");
     }
-    for (size_t i = 0; i < _countof(m_GPUDescriptorHeaps); ++i)
+    for (Uint32 node = 0; node < m_NodeCount; ++node)
     {
-        DEV_CHECK_ERR(m_GPUDescriptorHeaps[i].DvpGetTotalAllocationCount() == 0, "All GPU descriptor heap allocations must be released");
+        for (size_t i = 0; i < 2; ++i)
+        {
+            if (m_GPUDescriptorHeaps[node][i])
+                DEV_CHECK_ERR(m_GPUDescriptorHeaps[node][i]->DvpGetTotalAllocationCount() == 0, "All GPU descriptor heap allocations must be released");
+        }
     }
 #endif
 
@@ -706,7 +723,9 @@ DescriptorHeapAllocation RenderDeviceD3D12Impl::AllocateDescriptors(D3D12_DESCRI
 DescriptorHeapAllocation RenderDeviceD3D12Impl::AllocateGPUDescriptors(D3D12_DESCRIPTOR_HEAP_TYPE Type, UINT Count /*= 1*/)
 {
     VERIFY(Type >= D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV && Type <= D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, "Invalid heap type");
-    return m_GPUDescriptorHeaps[Type].Allocate(Count);
+    // Static/mutable descriptors are allocated from node 0's heap.
+    // In linked mode, node 0's shader-visible heap is used for resources that are shared.
+    return m_GPUDescriptorHeaps[0][Type]->Allocate(Count);
 }
 
 void RenderDeviceD3D12Impl::CreateRootSignature(const RefCntAutoPtr<PipelineResourceSignatureD3D12Impl>* ppSignatures, Uint32 SignatureCount, size_t Hash, RootSignatureD3D12** ppRootSig)

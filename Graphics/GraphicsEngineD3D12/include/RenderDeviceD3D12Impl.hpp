@@ -251,11 +251,15 @@ public:
 
     D3D12DynamicMemoryManager& GetDynamicMemoryManager() { return m_DynamicMemoryManager; }
 
-    GPUDescriptorHeap& GetGPUDescriptorHeap(D3D12_DESCRIPTOR_HEAP_TYPE Type)
+    GPUDescriptorHeap& GetGPUDescriptorHeap(D3D12_DESCRIPTOR_HEAP_TYPE Type, Uint32 NodeIndex = 0)
     {
         VERIFY_EXPR(Type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV || Type == D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
-        return m_GPUDescriptorHeaps[Type];
+        VERIFY_EXPR(NodeIndex < m_NodeCount);
+        VERIFY_EXPR(m_GPUDescriptorHeaps[NodeIndex][Type] != nullptr);
+        return *m_GPUDescriptorHeaps[NodeIndex][Type];
     }
+
+    Uint32 GetNodeCount() const { return m_NodeCount; }
 
     const GenerateMipsHelper& GetMipsGenerator() const { return m_MipsGenerator; }
 
@@ -308,8 +312,11 @@ private:
     CComPtr<ID3D12Device> m_pd3d12Device;
 
     CPUDescriptorHeap m_CPUDescriptorHeaps[D3D12_DESCRIPTOR_HEAP_TYPE_NUM_TYPES];
-    GPUDescriptorHeap m_GPUDescriptorHeaps[2]; // D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV == 0
-                                               // D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER	 == 1
+    // Per-node shader-visible descriptor heaps for linked multi-GPU.
+    // In single-GPU mode, only m_GPUDescriptorHeaps[0] is used (NodeCount=1).
+    // Index: [NodeIndex][HeapType] where HeapType is CBV_SRV_UAV(0) or SAMPLER(1).
+    std::unique_ptr<GPUDescriptorHeap> m_GPUDescriptorHeaps[DILIGENT_MAX_LINKED_GPU_NODES][2];
+    Uint32 m_NodeCount = 1;
 
     CommandListManager m_CmdListManagers[3]; // 0 - direct, 1 - compute, 2 - copy
 

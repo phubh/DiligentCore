@@ -32,13 +32,13 @@
 namespace Diligent
 {
 
-D3D12DynamicPage::D3D12DynamicPage(ID3D12Device* pd3d12Device, Uint64 Size)
+D3D12DynamicPage::D3D12DynamicPage(ID3D12Device* pd3d12Device, Uint64 Size, Uint32 CreationNodeMask, Uint32 VisibleNodeMask)
 {
     D3D12_HEAP_PROPERTIES HeapProps;
     HeapProps.CPUPageProperty      = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
     HeapProps.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
-    HeapProps.CreationNodeMask     = 1;
-    HeapProps.VisibleNodeMask      = 1;
+    HeapProps.CreationNodeMask     = CreationNodeMask;
+    HeapProps.VisibleNodeMask      = VisibleNodeMask;
 
     D3D12_RESOURCE_DESC ResourceDesc;
     ResourceDesc.Dimension          = D3D12_RESOURCE_DIMENSION_BUFFER;
@@ -90,7 +90,7 @@ D3D12DynamicMemoryManager::D3D12DynamicMemoryManager(IMemoryAllocator&      Allo
     }
 }
 
-D3D12DynamicPage D3D12DynamicMemoryManager::AllocatePage(Uint64 SizeInBytes)
+D3D12DynamicPage D3D12DynamicMemoryManager::AllocatePage(Uint64 SizeInBytes, Uint32 NodeMask)
 {
     std::lock_guard<std::mutex> AvailablePagesLock{m_AvailablePagesMtx};
 #ifdef DILIGENT_DEVELOPMENT
@@ -106,7 +106,11 @@ D3D12DynamicPage D3D12DynamicMemoryManager::AllocatePage(Uint64 SizeInBytes)
     }
     else
     {
-        return D3D12DynamicPage{m_DeviceD3D12Impl.GetD3D12Device(), SizeInBytes};
+        // Upload heap: created on the specified node, visible from all nodes so any GPU can read.
+        // For single-GPU (NodeMask=1) this is equivalent to the old behavior.
+        const Uint32 AllNodesMask = m_DeviceD3D12Impl.GetAdapterInfo().NodeMask;
+        const Uint32 VisibleMask  = (AllNodesMask > 1) ? AllNodesMask : NodeMask;
+        return D3D12DynamicPage{m_DeviceD3D12Impl.GetD3D12Device(), SizeInBytes, NodeMask, VisibleMask};
     }
 }
 
@@ -203,7 +207,7 @@ D3D12DynamicAllocation D3D12DynamicHeap::Allocate(Uint64 SizeInBytes, Uint64 Ali
         while (NewPageSize < SizeInBytes)
             NewPageSize *= 2;
 
-        D3D12DynamicPage NewPage = m_GlobalDynamicMemMgr.AllocatePage(NewPageSize);
+        D3D12DynamicPage NewPage = m_GlobalDynamicMemMgr.AllocatePage(NewPageSize, m_NodeMask);
         if (NewPage.IsValid())
         {
             m_CurrOffset    = 0;
