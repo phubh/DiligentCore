@@ -253,7 +253,7 @@ if (MINGW_BUILD)
     file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/export.map
         "{ global: *GetEngineFactoryOpenGL*; local: *; };"
     )
-    target_link_options(Diligent-GraphicsEngineOpenGL-shared PRIVATE LINKER:--version-script=export.map)
+    target_link_options(Diligent-GraphicsEngineOpenGL-shared PRIVATE LINKER:--version-script=${CMAKE_CURRENT_BINARY_DIR}/export.map)
 endif()
 
 target_link_libraries(Diligent-GraphicsEngineOpenGL-static

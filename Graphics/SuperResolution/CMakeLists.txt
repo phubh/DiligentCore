@@ -234,7 +234,7 @@ if (MINGW_BUILD)
     file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/export.map
         "{ global: *CreateSuperResolutionFactory*; local: *; };"
     )
-    target_link_options(Diligent-SuperResolution-shared PRIVATE LINKER:--version-script=export.map)
+    target_link_options(Diligent-SuperResolution-shared PRIVATE LINKER:--version-script=${CMAKE_CURRENT_BINARY_DIR}/export.map)
 endif()
 
 source_group("src" FILES ${SOURCE})

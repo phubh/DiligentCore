@@ -1,4 +1,5 @@
 if(PLATFORM_WIN32)
+    set(DILIGENT_BUILD_UTILS_DIR "${CMAKE_CURRENT_LIST_DIR}" CACHE INTERNAL "")
 
     # Copies engine dlls to the target's output directory
     function(copy_engine_dlls TARGET_NAME)
@@ -449,12 +450,27 @@ function(install_combined_static_lib COMBINED_LIB_NAME LIBS_LIST CUSTOM_TARGET_N
             endforeach()
 
             # Pack object files to a combined library and delete them
-            add_custom_command(
-                OUTPUT ${COMBINED_LIB_NAME}
-                COMMAND ${AR} -crs ${COMBINED_LIB_NAME} "*${CMAKE_C_OUTPUT_EXTENSION}"
-                COMMAND ${CMAKE_COMMAND} -E remove "*${CMAKE_C_OUTPUT_EXTENSION}"
-                APPEND
-            )
+            if(PLATFORM_WIN32)
+                # On Windows, ar does not expand glob patterns. Use a cmake script to collect files.
+                add_custom_command(
+                    OUTPUT ${COMBINED_LIB_NAME}
+                    COMMAND ${CMAKE_COMMAND}
+                        -DAR=${AR}
+                        -DCOMBINED_LIB_NAME=${COMBINED_LIB_NAME}
+                        -DOBJ_EXT=${CMAKE_C_OUTPUT_EXTENSION}
+                        -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}
+                        -P ${DILIGENT_BUILD_UTILS_DIR}/PackObjects.cmake
+                    COMMAND ${CMAKE_COMMAND} -E remove "*${CMAKE_C_OUTPUT_EXTENSION}"
+                    APPEND
+                )
+            else()
+                add_custom_command(
+                    OUTPUT ${COMBINED_LIB_NAME}
+                    COMMAND ${AR} -crs ${COMBINED_LIB_NAME} "*${CMAKE_C_OUTPUT_EXTENSION}"
+                    COMMAND ${CMAKE_COMMAND} -E remove "*${CMAKE_C_OUTPUT_EXTENSION}"
+                    APPEND
+                )
+            endif()
 
             add_custom_target(${CUSTOM_TARGET_NAME} ALL DEPENDS ${COMBINED_LIB_NAME})
             install(FILES "${CMAKE_CURRENT_BINARY_DIR}/${COMBINED_LIB_NAME}"
