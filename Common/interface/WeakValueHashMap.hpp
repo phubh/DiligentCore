@@ -128,6 +128,7 @@ public:
 
     private:
         friend class WeakValueHashMap<KeyType, ValueType, Hasher, Keyeq>;
+        friend class Impl;
 
         ValueHandle(Impl&                      Map,
                     std::shared_ptr<ValueType> pValue) :
@@ -142,6 +143,8 @@ public:
         std::shared_ptr<ValueType> m_pValue;
     };
 
+    using ValueHandleArray = std::vector<ValueHandle>;
+
     ValueHandle Get(const KeyType& Key) const
     {
         const size_t ShardIdx = GetShardIndex(Key);
@@ -153,6 +156,19 @@ public:
     {
         const size_t ShardIdx = GetShardIndex(Key);
         return m_pImpl[ShardIdx]->GetOrInsert(Key, std::forward<ArgsType>(Args)...);
+    }
+
+    /// Replaces Values with handles to all live values in the map.
+    ///
+    /// Values.clear() is used so that the caller may reuse the vector's capacity
+    /// across calls. Returned handles retain the values and the corresponding map
+    /// implementations. Values inserted or removed concurrently may or may not be
+    /// included. No map mutex is held when this method returns.
+    void GetLiveValues(ValueHandleArray& Values) const
+    {
+        Values.clear();
+        for (const std::shared_ptr<Impl>& pImpl : m_pImpl)
+            pImpl->CollectLiveValues(Values);
     }
 
 private:
@@ -251,6 +267,24 @@ private:
             if (Iter->second.expired())
             {
                 m_Map.erase(Iter);
+            }
+        }
+
+        void CollectLiveValues(ValueHandleArray& Values)
+        {
+            std::lock_guard<std::mutex> Lock{m_Mtx};
+
+            for (auto Iter = m_Map.begin(); Iter != m_Map.end();)
+            {
+                if (std::shared_ptr<ValueType> pValue = Iter->second.lock())
+                {
+                    Values.emplace_back(ValueHandle{*this, std::move(pValue)});
+                    ++Iter;
+                }
+                else
+                {
+                    Iter = m_Map.erase(Iter);
+                }
             }
         }
 
