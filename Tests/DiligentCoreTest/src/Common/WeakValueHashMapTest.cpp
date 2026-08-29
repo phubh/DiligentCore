@@ -28,8 +28,10 @@
 
 #include "gtest/gtest.h"
 
-#include <vector>
+#include <algorithm>
+#include <atomic>
 #include <thread>
+#include <vector>
 
 #include "ThreadSignal.hpp"
 
@@ -195,6 +197,141 @@ TEST(Common_WeakValueHashMap, DestroyMapBeforeMoveIntoLastHandle)
     auto Handle = Map.GetOrInsert(1, "x");
     Map         = WeakValueHashMap<int, std::string>{};
     Handle      = {};
+}
+
+TEST(Common_WeakValueHashMap, GetLiveValues)
+{
+    WeakValueHashMap<int, std::string> Map{4};
+
+    std::vector<WeakValueHashMap<int, std::string>::ValueHandle> Handles;
+    Handles.emplace_back(Map.GetOrInsert(1, "Value1"));
+    Handles.emplace_back(Map.GetOrInsert(2, "Value2"));
+    Handles.emplace_back(Map.GetOrInsert(3, "Value3"));
+
+    WeakValueHashMap<int, std::string>::ValueHandleArray LiveValues;
+    LiveValues.reserve(8);
+    auto* const pReservedData = LiveValues.data();
+    Map.GetLiveValues(LiveValues);
+
+    EXPECT_EQ(LiveValues.data(), pReservedData);
+
+    std::vector<std::string> Values;
+    for (const auto& Value : LiveValues)
+        Values.push_back(*Value);
+
+    std::sort(Values.begin(), Values.end());
+    EXPECT_EQ(Values, (std::vector<std::string>{"Value1", "Value2", "Value3"}));
+}
+
+TEST(Common_WeakValueHashMap, LiveValueHandlesRetainValues)
+{
+    WeakValueHashMap<int, std::string> Map;
+
+    auto                                                 Handle = Map.GetOrInsert(1, "Value1");
+    WeakValueHashMap<int, std::string>::ValueHandleArray LiveValues;
+    Map.GetLiveValues(LiveValues);
+
+    ASSERT_EQ(LiveValues.size(), 1u);
+    EXPECT_EQ(*LiveValues[0], "Value1");
+
+    Handle        = {};
+    auto Existing = Map.Get(1);
+    EXPECT_TRUE(Existing);
+    EXPECT_EQ(*Existing, "Value1");
+
+    // Accessing the map while the snapshot is alive does not depend on any
+    // mutex retained by GetLiveValues().
+    auto Inserted = Map.GetOrInsert(2, "Value2");
+    EXPECT_TRUE(Inserted);
+    EXPECT_EQ(*Inserted, "Value2");
+
+    Existing = {};
+    Inserted = {};
+    LiveValues.clear();
+
+    EXPECT_FALSE(Map.Get(1));
+    EXPECT_FALSE(Map.Get(2));
+}
+
+TEST(Common_WeakValueHashMap, LiveValueSnapshotRetainsValuesDuringConcurrentRelease)
+{
+    static constexpr int ValueCount = 32;
+
+    WeakValueHashMap<int, std::string>                           Map{4};
+    std::vector<WeakValueHashMap<int, std::string>::ValueHandle> Handles;
+    Handles.reserve(ValueCount);
+    for (int Key = 0; Key < ValueCount; ++Key)
+        Handles.emplace_back(Map.GetOrInsert(Key, "Value" + std::to_string(Key)));
+
+    Threading::Signal SnapshotReady;
+    Threading::Signal ReleaseSnapshot;
+    std::atomic_int   SnapshotValueCount{0};
+
+    std::thread SnapshotThread{
+        [&]() {
+            WeakValueHashMap<int, std::string>::ValueHandleArray LiveValues;
+            Map.GetLiveValues(LiveValues);
+            SnapshotValueCount.store(static_cast<int>(LiveValues.size()));
+            SnapshotReady.Trigger();
+            ReleaseSnapshot.Wait(true, 1);
+        }};
+
+    SnapshotReady.Wait(true, 1);
+    Handles.clear();
+
+    for (int Key = 0; Key < ValueCount; ++Key)
+        EXPECT_TRUE(Map.Get(Key));
+
+    ReleaseSnapshot.Trigger();
+    SnapshotThread.join();
+
+    EXPECT_EQ(SnapshotValueCount.load(), ValueCount);
+    for (int Key = 0; Key < ValueCount; ++Key)
+        EXPECT_FALSE(Map.Get(Key));
+}
+
+TEST(Common_WeakValueHashMap, GetLiveValuesRemovesExpiredValues)
+{
+    struct BlockingDestructionValue
+    {
+        BlockingDestructionValue(Threading::Signal& DestructionStarted,
+                                 Threading::Signal& ContinueDestruction) :
+            DestructionStarted{DestructionStarted},
+            ContinueDestruction{ContinueDestruction}
+        {}
+
+        ~BlockingDestructionValue()
+        {
+            DestructionStarted.Trigger();
+            ContinueDestruction.Wait(true, 1);
+        }
+
+        Threading::Signal& DestructionStarted;
+        Threading::Signal& ContinueDestruction;
+    };
+
+    WeakValueHashMap<int, BlockingDestructionValue> Map;
+    Threading::Signal                               DestructionStarted;
+    Threading::Signal                               ContinueDestruction;
+    auto                                            Handle = Map.GetOrInsert(1, DestructionStarted, ContinueDestruction);
+
+    std::thread ReleaseThread{
+        [&Handle]() {
+            Handle = {};
+        }};
+
+    DestructionStarted.Wait(true, 1);
+
+    WeakValueHashMap<int, BlockingDestructionValue>::ValueHandleArray LiveValues;
+    Map.GetLiveValues(LiveValues);
+    EXPECT_TRUE(LiveValues.empty());
+
+    ContinueDestruction.Trigger();
+    ReleaseThread.join();
+
+    auto Replacement = Map.GetOrInsert(1, DestructionStarted, ContinueDestruction);
+    EXPECT_TRUE(Replacement);
+    ContinueDestruction.Trigger();
 }
 
 static constexpr size_t kNumThreads = 8;
